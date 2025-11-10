@@ -3,6 +3,8 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
+#include <stdarg.h>
+#include <stdio.h>
 
 Baratinha::Baratinha()
     : _tof(),
@@ -17,10 +19,50 @@ Baratinha::Baratinha()
       _lastControlMicros(0),
       _controlIntervalUs(kDefaultControlIntervalUs),
       _otaEnabled(true),
-      _otaConfigured(false) {}
+      _otaConfigured(false),
+      _telnetServer(23),
+      _telnetClient(),
+      _telnetEnabled(true),
+      _telnetServerActive(false),
+      _telnetPort(23),
+      _otaInProgress(false),
+      _otaAnimationIndex(0) {}
 
 void Baratinha::beginSerial(uint32_t baud) {
   Serial.begin(baud);
+}
+
+bool Baratinha::setupAll(uint32_t serialBaud,
+                         uint8_t ledBrightness,
+                         uint32_t pwmFrequency,
+                         uint8_t pwmResolutionBits,
+                         uint8_t tofSda,
+                         uint8_t tofScl,
+                         uint16_t tofTimeoutMs) {
+  beginSerial(serialBaud);
+  Serial.println(F("[Baratinha] Iniciando setup completo."));
+
+  setupLeds(ledBrightness);
+  Serial.println(F("[Baratinha] LEDs configurados."));
+
+  setupMotors(pwmFrequency, pwmResolutionBits);
+  Serial.println(F("[Baratinha] Motores configurados."));
+
+  setupButtons();
+  Serial.println(F("[Baratinha] Botao pronto."));
+
+  if (!setupTOF(tofSda, tofScl, tofTimeoutMs)) {
+    Serial.println(F("[Baratinha] ERRO: Sensor ToF nao respondeu."));
+    setAllLeds(0, 255, 40);
+    FastLED.show();
+    return false;
+  }
+
+  Serial.println(F("[Baratinha] Sensor ToF pronto."));
+  setAllLeds(96, 255, 80);
+  FastLED.show();
+  Serial.println(F("[Baratinha] Setup concluido."));
+  return true;
 }
 
 bool Baratinha::setupTOF(uint8_t sda, uint8_t scl, uint16_t timeoutMs) {
@@ -145,6 +187,15 @@ void Baratinha::setControlIntervalUs(uint32_t intervalUs) {
   resetControlTick();
 }
 
+void Baratinha::setControlInterval(float seconds) {
+  if (!(seconds > 0.0f)) {
+    setControlIntervalUs(kDefaultControlIntervalUs);
+    return;
+  }
+  const uint32_t intervalUs = static_cast<uint32_t>(seconds * 1000000.0f);
+  setControlIntervalUs(intervalUs);
+}
+
 uint32_t Baratinha::controlIntervalUs() const {
   return _controlIntervalUs;
 }
@@ -232,7 +283,6 @@ void Baratinha::setupOTAStation(const char* ssid, const char* password) {
   _otaConfigured = false;
   if (ssid == nullptr || password == nullptr) {
     Serial.println(F("Credenciais invalidas para OTA station."));
-    _otaConfigured = false;
     return;
   }
 
@@ -249,29 +299,13 @@ void Baratinha::setupOTAStation(const char* ssid, const char* password) {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println(F("Falha ao conectar a rede WiFi para OTA."));
-    _otaConfigured = false;
     return;
   }
 
-  ArduinoOTA.onStart([]() {
-    Serial.println(F("OTA comecou"));
-  });
-  ArduinoOTA.onEnd([]() {
-    Serial.println(F("OTA finalizado"));
-  });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    const unsigned int percent = (total == 0) ? 0 : (progress * 100U / total);
-    Serial.print(F("OTA progresso: "));
-    Serial.print(percent);
-    Serial.println(F("%"));
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.print(F("Erro OTA: "));
-    Serial.println(static_cast<int>(error));
-  });
-
+  configureOTAHandlers();
   ArduinoOTA.begin();
   _otaConfigured = true;
+  startTelnetServer(_telnetPort);
 
   Serial.print(F("OTA pronto. IP: "));
   Serial.println(WiFi.localIP());
@@ -281,36 +315,19 @@ void Baratinha::setupOTAAccessPoint(const char* ssid, const char* password) {
   _otaConfigured = false;
   if (ssid == nullptr || password == nullptr) {
     Serial.println(F("Credenciais invalidas para OTA access point."));
-    _otaConfigured = false;
     return;
   }
 
   WiFi.mode(WIFI_AP);
   if (!WiFi.softAP(ssid, password)) {
     Serial.println(F("Falha ao iniciar access point para OTA."));
-    _otaConfigured = false;
     return;
   }
 
-  ArduinoOTA.onStart([]() {
-    Serial.println(F("OTA comecou"));
-  });
-  ArduinoOTA.onEnd([]() {
-    Serial.println(F("OTA finalizado"));
-  });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    const unsigned int percent = (total == 0) ? 0 : (progress * 100U / total);
-    Serial.print(F("OTA progresso: "));
-    Serial.print(percent);
-    Serial.println(F("%"));
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.print(F("Erro OTA: "));
-    Serial.println(static_cast<int>(error));
-  });
-
+  configureOTAHandlers();
   ArduinoOTA.begin();
   _otaConfigured = true;
+  startTelnetServer(_telnetPort);
 
   Serial.print(F("OTA AP pronto. IP: "));
   Serial.println(WiFi.softAPIP());
@@ -318,6 +335,72 @@ void Baratinha::setupOTAAccessPoint(const char* ssid, const char* password) {
 
 void Baratinha::enableOTA(bool enable) {
   _otaEnabled = enable;
+}
+
+void Baratinha::enableTelnetTelemetry(bool enable, uint16_t port) {
+  _telnetEnabled = enable;
+  _telnetPort = port;
+
+  if (!enable) {
+    if (_telnetClient) {
+      _telnetClient.stop();
+    }
+    if (_telnetServerActive) {
+      _telnetServer.stop();
+      _telnetServerActive = false;
+    }
+    return;
+  }
+
+  if (_otaConfigured) {
+    startTelnetServer(_telnetPort);
+  }
+}
+
+void Baratinha::println() {
+  Serial.println();
+  if (_telnetEnabled && _telnetClient && _telnetClient.connected()) {
+    _telnetClient.println();
+  }
+}
+
+void Baratinha::printf(const char* format, ...) {
+  if (format == nullptr) {
+    return;
+  }
+
+  char buffer[256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(buffer, sizeof(buffer), format, args);
+  va_end(args);
+
+  broadcastRaw(buffer);
+}
+
+void Baratinha::configureOTAHandlers() {
+  ArduinoOTA.onStart([this]() {
+    Serial.println(F("OTA comecou"));
+    _otaInProgress = true;
+    _otaAnimationIndex = 0;
+    showOTAStartAnimation();
+  });
+  ArduinoOTA.onEnd([this]() {
+    Serial.println(F("OTA finalizado"));
+    _otaInProgress = false;
+    showOTAEndAnimation();
+  });
+  ArduinoOTA.onProgress([this](unsigned int progress, unsigned int total) {
+    const unsigned int percent = (total == 0) ? 0 : (progress * 100U / total);
+    Serial.print(F("OTA progresso: "));
+    Serial.print(percent);
+    Serial.println(F("%"));
+    showOTAProgressAnimation(progress, total);
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.print(F("Erro OTA: "));
+    Serial.println(static_cast<int>(error));
+  });
 }
 
 void Baratinha::emitTelemetry(float setpoint, float measurement, float error,
@@ -332,23 +415,41 @@ void Baratinha::emitTelemetry(float setpoint, float measurement, float error,
   }
   _telemetryCounter = 0;
 
-  Serial.print(millis());
-  Serial.print(',');
-  Serial.print(setpoint);
-  Serial.print(',');
-  Serial.print(measurement);
-  Serial.print(',');
-  Serial.print(error);
-  Serial.print(',');
-  Serial.print(controlRaw);
-  Serial.print(',');
-  Serial.print(controlLimited);
-  Serial.print(',');
-  Serial.print(pTerm);
-  Serial.print(',');
-  Serial.print(iTerm);
-  Serial.print(',');
-  Serial.println(dTerm);
+  auto emitTo = [&](Print& out) {
+    out.print(millis());
+    out.print(',');
+    out.print(setpoint);
+    out.print(',');
+    out.print(measurement);
+    out.print(',');
+    out.print(error);
+    out.print(',');
+    out.print(controlRaw);
+    out.print(',');
+    out.print(controlLimited);
+    out.print(',');
+    out.print(pTerm);
+    out.print(',');
+    out.print(iTerm);
+    out.print(',');
+    out.println(dTerm);
+  };
+
+  emitTo(Serial);
+  if (_telnetEnabled && _telnetClient && _telnetClient.connected()) {
+    emitTo(_telnetClient);
+  }
+}
+
+void Baratinha::broadcastRaw(const char* message) {
+  if (message == nullptr) {
+    return;
+  }
+
+  Serial.print(message);
+  if (_telnetEnabled && _telnetClient && _telnetClient.connected()) {
+    _telnetClient.print(message);
+  }
 }
 
 void Baratinha::motorE_PWM(int vel) {
@@ -455,5 +556,96 @@ void Baratinha::resetControlTick() {
 void Baratinha::processOTA() {
   if (_otaEnabled && _otaConfigured) {
     ArduinoOTA.handle();
+  }
+  processTelnet();
+}
+
+void Baratinha::processTelnet() {
+  if (!_telnetEnabled || !_telnetServerActive) {
+    return;
+  }
+
+  if (!_telnetClient || !_telnetClient.connected()) {
+    if (_telnetClient) {
+      _telnetClient.stop();
+    }
+    WiFiClient incoming = _telnetServer.available();
+    if (incoming && incoming.connected()) {
+      _telnetClient = incoming;
+      _telnetClient.println(F("Bem-vindo ao console Telnet da Baratinha!"));
+      _telnetClient.println(F("Telemetria sera exibida aqui quando habilitada."));
+    }
+  } else {
+    while (_telnetClient.available() > 0) {
+      _telnetClient.read();  // descarta comandos por enquanto
+    }
+  }
+}
+
+void Baratinha::startTelnetServer(uint16_t port) {
+  if (!_telnetEnabled) {
+    return;
+  }
+
+  if (_telnetClient) {
+    _telnetClient.stop();
+  }
+
+  _telnetServer.stop();
+  _telnetServer = WiFiServer(port);
+  _telnetServer.begin();
+  _telnetServer.setNoDelay(true);
+  _telnetServerActive = true;
+
+  Serial.print(F("Telnet ativo na porta "));
+  Serial.println(port);
+}
+
+void Baratinha::showOTAStartAnimation() {
+  for (uint8_t wave = 0; wave < 12; ++wave) {
+    for (uint8_t i = 0; i < kNumLeds; ++i) {
+      const uint8_t brightness = (i == (wave % kNumLeds)) ? 200 : 15;
+      _leds[i] = CHSV(160, 255, brightness);
+    }
+    FastLED.show();
+    delay(60);
+  }
+}
+
+void Baratinha::showOTAProgressAnimation(unsigned int progress, unsigned int total) {
+  if (!_otaInProgress) {
+    return;
+  }
+
+  const uint8_t steps = kNumLeds * 4;
+  if (total == 0) {
+    _otaAnimationIndex = (_otaAnimationIndex + 1) % kNumLeds;
+  } else {
+    const uint32_t scaled = (static_cast<uint32_t>(progress) * steps) / total;
+    _otaAnimationIndex = static_cast<uint8_t>(scaled % kNumLeds);
+  }
+
+  for (uint8_t i = 0; i < kNumLeds; ++i) {
+    const uint8_t offset = (i + kNumLeds - _otaAnimationIndex) % kNumLeds;
+    uint8_t brightness = 30;
+    if (offset == 0) {
+      brightness = 200;
+    } else if (offset == 1 || offset == (kNumLeds - 1)) {
+      brightness = 120;
+    }
+    _leds[i] = CHSV(160, 255, brightness);
+  }
+
+  FastLED.show();
+}
+
+void Baratinha::showOTAEndAnimation() {
+  for (uint8_t pulse = 0; pulse < 3; ++pulse) {
+    setAllLeds(96, 255, 200);
+    FastLED.show();
+    delay(120);
+    setAllLeds(96, 255, 20);
+    FastLED.show();
+    delay(120);
   }
 }

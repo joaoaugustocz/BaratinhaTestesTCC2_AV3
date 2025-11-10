@@ -4,6 +4,7 @@
 #include <FastLED.h>
 #include <VL53L0X.h>
 #include <driver/gpio.h>
+#include <WiFi.h>
 
 /// @brief Classe utilitaria que concentra toda a interacao com o robo Baratinha:
 /// sensores, motores, LEDs, botao start/stop e telemetria.
@@ -19,6 +20,15 @@ public:
 
   /// Inicializa a porta serial (conveniente para logs e telemetria).
   void beginSerial(uint32_t baud = 115200);
+
+  /// Executa todos os setups essenciais do robo.
+  bool setupAll(uint32_t serialBaud = 115200,
+                uint8_t ledBrightness = 100,
+                uint32_t pwmFrequency = 20000,
+                uint8_t pwmResolutionBits = 8,
+                uint8_t tofSda = 2,
+                uint8_t tofScl = 4,
+                uint16_t tofTimeoutMs = 500);
 
   /// Configura e inicia o sensor ToF (VL53L0X).
   /// @return true se o sensor respondeu corretamente.
@@ -50,6 +60,9 @@ public:
 
   /// Ajusta o periodo entre chamadas de controle (em microssegundos).
   void setControlIntervalUs(uint32_t intervalUs);
+
+  /// Ajusta o periodo entre chamadas de controle (em segundos).
+  void setControlInterval(float seconds);
 
   /// Consulta o periodo atual do controle em microssegundos.
   uint32_t controlIntervalUs() const;
@@ -85,6 +98,51 @@ public:
   /// Liga ou desliga o processamento do OTA.
   void enableOTA(bool enable);
 
+  /// Habilita/desabilita o servidor Telnet para telemetria.
+  void enableTelnetTelemetry(bool enable, uint16_t port = 23);
+
+  /// Replica Serial.print em todos os canais (USB + Telnet).
+  template <typename T>
+  void print(const T& value) {
+    Serial.print(value);
+    if (_telnetEnabled && _telnetClient && _telnetClient.connected()) {
+      _telnetClient.print(value);
+    }
+  }
+
+  /// Versao de print com argumento extra (base/digitos).
+  template <typename T>
+  void print(const T& value, int format) {
+    Serial.print(value, format);
+    if (_telnetEnabled && _telnetClient && _telnetClient.connected()) {
+      _telnetClient.print(value, format);
+    }
+  }
+
+  /// Versao com quebra de linha automatica.
+  template <typename T>
+  void println(const T& value) {
+    Serial.println(value);
+    if (_telnetEnabled && _telnetClient && _telnetClient.connected()) {
+      _telnetClient.println(value);
+    }
+  }
+
+  /// println com argumento extra (base/digitos).
+  template <typename T>
+  void println(const T& value, int format) {
+    Serial.println(value, format);
+    if (_telnetEnabled && _telnetClient && _telnetClient.connected()) {
+      _telnetClient.println(value, format);
+    }
+  }
+
+  /// Equivalente a Serial.println() sem argumentos.
+  void println();
+
+  /// printf compartilhado (via Serial e Telnet).
+  void printf(const char* format, ...);
+
   /// Emite a linha de telemetria com o formato esperado pelas ferramentas atuais.
   void emitTelemetry(float setpoint, float measurement, float error,
                      float controlRaw, float controlLimited,
@@ -114,6 +172,13 @@ private:
   void setAllLeds(uint8_t h, uint8_t s, uint8_t v);
   void resetControlTick();
   void processOTA();
+  void processTelnet();
+  void startTelnetServer(uint16_t port);
+  void configureOTAHandlers();
+  void showOTAStartAnimation();
+  void showOTAProgressAnimation(unsigned int progress, unsigned int total);
+  void showOTAEndAnimation();
+  void broadcastRaw(const char* message);
 
   VL53L0X _tof;
   CRGB _leds[kNumLeds];
@@ -128,4 +193,11 @@ private:
   uint32_t _controlIntervalUs;
   bool _otaEnabled;
   bool _otaConfigured;
+  WiFiServer _telnetServer;
+  WiFiClient _telnetClient;
+  bool _telnetEnabled;
+  bool _telnetServerActive;
+  uint16_t _telnetPort;
+  bool _otaInProgress;
+  uint8_t _otaAnimationIndex;
 };
