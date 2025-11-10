@@ -21,8 +21,8 @@ constexpr float setPoint = 350.0f;
 
 // Ajuste a estrategia de OTA: true => cria Access Point, false => conecta em uma rede existente.
 constexpr bool USE_WIFI_AP = true;
-constexpr char WIFI_STA_SSID[] = "Agility-IBITU";
-constexpr char WIFI_STA_PASSWORD[] = "0203040506";
+constexpr char WIFI_STA_SSID[] = "------";
+constexpr char WIFI_STA_PASSWORD[] = "------";
 // Credenciais do ponto de acesso criado pelo robo para OTA.
 constexpr char WIFI_AP_SSID[] = "Baratinha-OTA";
 constexpr char WIFI_AP_PASSWORD[] = "12345678";
@@ -34,18 +34,16 @@ float d_state_simple = 0.0f;
 }  // namespace
 
 void setup() {
-  const bool hardwareReady = bra.setupAll();
+  // bra.setPreferAccessPoint(USE_WIFI_AP);
+  // bra.setStationCredentials(WIFI_STA_SSID, WIFI_STA_PASSWORD);
+  // bra.setAccessPointCredentials(WIFI_AP_SSID, WIFI_AP_PASSWORD);
 
-  if (USE_WIFI_AP) {
-    bra.setupOTAAccessPoint(WIFI_AP_SSID, WIFI_AP_PASSWORD);
-  } else {
-    bra.setupOTAStation(WIFI_STA_SSID, WIFI_STA_PASSWORD);
-  }
+  const bool hardwareReady = bra.setupAll();
   // Caso nao deseje OTA, basta descomentar a linha abaixo.
   // bra.enableOTA(false);
 
   if (!hardwareReady) {
-    Serial.println(F("Hardware nao inicializou corretamente. Aguardando OTA..."));
+    bra.println(F("Hardware nao inicializou corretamente. Aguardando OTA..."));
     while (true) {
       bra.updateStartStop();
       delay(500);
@@ -93,7 +91,13 @@ void loop() {
 
   // e_prev = error;
   // d_state_simple = d_new;
+  static int count = 0;
+  count++;
+  if (count >= 100) {
+    count = 0;
+  } 
 
+  bra.printf("Contador: %d\r\n", count);
 
   // bra.emitTelemetry(setPoint, measurement, error,
   //                   controlRaw, controlLimited,

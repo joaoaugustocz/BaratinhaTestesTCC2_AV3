@@ -90,10 +90,12 @@ public:
   void setTelemetryDivider(uint8_t divider);
 
   /// Configura OTA no modo station (conectando em uma rede WiFi existente).
-  void setupOTAStation(const char* ssid, const char* password);
+  /// @return true se conectou com sucesso.
+  bool setupOTAStation(const char* ssid, const char* password);
 
-  /// Configura OTA no modo Access Point (cria rede propria).
-  void setupOTAAccessPoint(const char* ssid, const char* password);
+  /// Configura OTA no modo Access Point (cria rede propria, usando nomes padrao se necessario).
+  /// @return true se o AP foi iniciado com sucesso.
+  bool setupOTAAccessPoint(const char* ssid, const char* password);
 
   /// Liga ou desliga o processamento do OTA.
   void enableOTA(bool enable);
@@ -143,6 +145,15 @@ public:
   /// printf compartilhado (via Serial e Telnet).
   void printf(const char* format, ...);
 
+  /// Define credenciais para o modo station (opcional).
+  void setStationCredentials(const char* ssid, const char* password);
+
+  /// Define credenciais para o modo Access Point (opcional).
+  void setAccessPointCredentials(const char* ssid, const char* password);
+
+  /// Escolhe qual modo tentar primeiro (false = preferir station).
+  void setPreferAccessPoint(bool prefer);
+
   /// Emite a linha de telemetria com o formato esperado pelas ferramentas atuais.
   void emitTelemetry(float setpoint, float measurement, float error,
                      float controlRaw, float controlLimited,
@@ -179,6 +190,12 @@ private:
   void showOTAProgressAnimation(unsigned int progress, unsigned int total);
   void showOTAEndAnimation();
   void broadcastRaw(const char* message);
+  bool autoConfigureOTA();
+  bool configureOTA(bool preferAccessPoint,
+                    const char* staSsid,
+                    const char* staPassword,
+                    const char* apSsid,
+                    const char* apPassword);
 
   VL53L0X _tof;
   CRGB _leds[kNumLeds];
@@ -200,4 +217,9 @@ private:
   uint16_t _telnetPort;
   bool _otaInProgress;
   uint8_t _otaAnimationIndex;
+  String _staSsid;
+  String _staPassword;
+  String _apSsid;
+  String _apPassword;
+  bool _preferAccessPoint;
 };

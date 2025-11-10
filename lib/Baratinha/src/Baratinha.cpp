@@ -6,6 +6,11 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+namespace {
+constexpr char kDefaultApSsid[] = "Baratinha-OTA";
+constexpr char kDefaultApPassword[] = "12345678";
+}
+
 Baratinha::Baratinha()
     : _tof(),
       _leds{},
@@ -26,7 +31,12 @@ Baratinha::Baratinha()
       _telnetServerActive(false),
       _telnetPort(23),
       _otaInProgress(false),
-      _otaAnimationIndex(0) {}
+      _otaAnimationIndex(0),
+      _staSsid(),
+      _staPassword(),
+      _apSsid(kDefaultApSsid),
+      _apPassword(kDefaultApPassword),
+      _preferAccessPoint(false) {}
 
 void Baratinha::beginSerial(uint32_t baud) {
   Serial.begin(baud);
@@ -55,6 +65,9 @@ bool Baratinha::setupAll(uint32_t serialBaud,
     Serial.println(F("[Baratinha] ERRO: Sensor ToF nao respondeu."));
     setAllLeds(0, 255, 40);
     FastLED.show();
+    if (_otaEnabled) {
+      autoConfigureOTA();
+    }
     return false;
   }
 
@@ -62,6 +75,10 @@ bool Baratinha::setupAll(uint32_t serialBaud,
   setAllLeds(96, 255, 80);
   FastLED.show();
   Serial.println(F("[Baratinha] Setup concluido."));
+
+  if (_otaEnabled) {
+    autoConfigureOTA();
+  }
   return true;
 }
 
@@ -279,11 +296,11 @@ void Baratinha::setTelemetryDivider(uint8_t divider) {
   _telemetryCounter = 0;
 }
 
-void Baratinha::setupOTAStation(const char* ssid, const char* password) {
+bool Baratinha::setupOTAStation(const char* ssid, const char* password) {
   _otaConfigured = false;
   if (ssid == nullptr || password == nullptr) {
     Serial.println(F("Credenciais invalidas para OTA station."));
-    return;
+    return false;
   }
 
   WiFi.mode(WIFI_STA);
@@ -299,7 +316,7 @@ void Baratinha::setupOTAStation(const char* ssid, const char* password) {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println(F("Falha ao conectar a rede WiFi para OTA."));
-    return;
+    return false;
   }
 
   configureOTAHandlers();
@@ -309,19 +326,18 @@ void Baratinha::setupOTAStation(const char* ssid, const char* password) {
 
   Serial.print(F("OTA pronto. IP: "));
   Serial.println(WiFi.localIP());
+  return true;
 }
 
-void Baratinha::setupOTAAccessPoint(const char* ssid, const char* password) {
+bool Baratinha::setupOTAAccessPoint(const char* ssid, const char* password) {
   _otaConfigured = false;
-  if (ssid == nullptr || password == nullptr) {
-    Serial.println(F("Credenciais invalidas para OTA access point."));
-    return;
-  }
+  const char* apSsid = (ssid != nullptr && ssid[0] != '\0') ? ssid : kDefaultApSsid;
+  const char* apPassword = (password != nullptr && password[0] != '\0') ? password : kDefaultApPassword;
 
   WiFi.mode(WIFI_AP);
-  if (!WiFi.softAP(ssid, password)) {
+  if (!WiFi.softAP(apSsid, apPassword)) {
     Serial.println(F("Falha ao iniciar access point para OTA."));
-    return;
+    return false;
   }
 
   configureOTAHandlers();
@@ -331,10 +347,29 @@ void Baratinha::setupOTAAccessPoint(const char* ssid, const char* password) {
 
   Serial.print(F("OTA AP pronto. IP: "));
   Serial.println(WiFi.softAPIP());
+  return true;
 }
 
 void Baratinha::enableOTA(bool enable) {
+  if (_otaEnabled == enable) {
+    return;
+  }
   _otaEnabled = enable;
+  if (!enable) {
+    _otaInProgress = false;
+    _otaConfigured = false;
+    if (_telnetClient) {
+      _telnetClient.stop();
+    }
+    if (_telnetServerActive) {
+      _telnetServer.stop();
+      _telnetServerActive = false;
+    }
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+  } else {
+    autoConfigureOTA();
+  }
 }
 
 void Baratinha::enableTelnetTelemetry(bool enable, uint16_t port) {
@@ -357,6 +392,20 @@ void Baratinha::enableTelnetTelemetry(bool enable, uint16_t port) {
   }
 }
 
+void Baratinha::setStationCredentials(const char* ssid, const char* password) {
+  _staSsid = (ssid != nullptr) ? ssid : "";
+  _staPassword = (password != nullptr) ? password : "";
+}
+
+void Baratinha::setAccessPointCredentials(const char* ssid, const char* password) {
+  _apSsid = (ssid != nullptr && ssid[0] != '\0') ? ssid : kDefaultApSsid;
+  _apPassword = (password != nullptr && password[0] != '\0') ? password : kDefaultApPassword;
+}
+
+void Baratinha::setPreferAccessPoint(bool prefer) {
+  _preferAccessPoint = prefer;
+}
+
 void Baratinha::println() {
   Serial.println();
   if (_telnetEnabled && _telnetClient && _telnetClient.connected()) {
@@ -376,6 +425,41 @@ void Baratinha::printf(const char* format, ...) {
   va_end(args);
 
   broadcastRaw(buffer);
+}
+
+bool Baratinha::configureOTA(bool preferAccessPoint,
+                             const char* staSsid,
+                             const char* staPassword,
+                             const char* apSsid,
+                             const char* apPassword) {
+  bool success = false;
+  const bool hasStationCreds = (staSsid != nullptr && staSsid[0] != '\0' &&
+                                staPassword != nullptr && staPassword[0] != '\0');
+
+  if (preferAccessPoint) {
+    println(F("Preferencia: Access Point."));
+    success = setupOTAAccessPoint(apSsid, apPassword);
+    if (!success && hasStationCreds) {
+      println(F("Falha no modo AP. Tentando conectar em modo station..."));
+      success = setupOTAStation(staSsid, staPassword);
+    }
+  } else {
+    println(F("Preferencia: Station."));
+    if (hasStationCreds) {
+      success = setupOTAStation(staSsid, staPassword);
+    } else {
+      println(F("Credenciais de station ausentes."));
+    }
+    if (!success) {
+      println(F("Alternando para Access Point."));
+      success = setupOTAAccessPoint(apSsid, apPassword);
+    }
+  }
+
+  if (!success) {
+    println(F("Nao foi possivel iniciar OTA em nenhum modo."));
+  }
+  return success;
 }
 
 void Baratinha::configureOTAHandlers() {
@@ -450,6 +534,22 @@ void Baratinha::broadcastRaw(const char* message) {
   if (_telnetEnabled && _telnetClient && _telnetClient.connected()) {
     _telnetClient.print(message);
   }
+}
+
+bool Baratinha::autoConfigureOTA() {
+  if (!_otaEnabled) {
+    return false;
+  }
+  if (_otaConfigured) {
+    return true;
+  }
+
+  const char* staSsid = _staSsid.length() ? _staSsid.c_str() : nullptr;
+  const char* staPassword = _staPassword.length() ? _staPassword.c_str() : nullptr;
+  const char* apSsid = _apSsid.length() ? _apSsid.c_str() : kDefaultApSsid;
+  const char* apPassword = _apPassword.length() ? _apPassword.c_str() : kDefaultApPassword;
+
+  return configureOTA(_preferAccessPoint, staSsid, staPassword, apSsid, apPassword);
 }
 
 void Baratinha::motorE_PWM(int vel) {
@@ -616,14 +716,14 @@ void Baratinha::showOTAProgressAnimation(unsigned int progress, unsigned int tot
   if (!_otaInProgress) {
     return;
   }
-
-  const uint8_t steps = kNumLeds * 4;
-  if (total == 0) {
-    _otaAnimationIndex = (_otaAnimationIndex + 1) % kNumLeds;
-  } else {
-    const uint32_t scaled = (static_cast<uint32_t>(progress) * steps) / total;
-    _otaAnimationIndex = static_cast<uint8_t>(scaled % kNumLeds);
-  }
+  _otaAnimationIndex = (_otaAnimationIndex + 1) % kNumLeds;
+  // const uint8_t steps = kNumLeds * 4;
+  // if (total == 0) {
+  //   _otaAnimationIndex = (_otaAnimationIndex + 1) % kNumLeds;
+  // } else {
+  //   const uint32_t scaled = (static_cast<uint32_t>(progress) * steps) / total;
+  //   _otaAnimationIndex = static_cast<uint8_t>(scaled % kNumLeds);
+  // }
 
   for (uint8_t i = 0; i < kNumLeds; ++i) {
     const uint8_t offset = (i + kNumLeds - _otaAnimationIndex) % kNumLeds;
